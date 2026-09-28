@@ -26,7 +26,9 @@ misbehaving.
 | `ShowButtonOutlines` | bool | `true` | Draw the filled rounded rectangle behind each button. |
 | `EnablePixelShift` | bool | `false` | Periodically shift the image by a pixel to reduce OLED burn-in. |
 | `FontFamily` | string | `""` | Font family for text labels; `""` uses the system default sans. Rendering falls back across system fonts per glyph, so symbols/emoji outside the family still show. |
-| `FontBold` | bool | `true` | Render labels in bold. |
+| `FontBold` | bool | `true` | Render labels in bold (weight 700; otherwise 400). Ignored when `FontWeight` is set. |
+| `FontWeight` | u16 | unset | Numeric label weight, 1–1000 in CSS/OpenType terms (400 regular, 500 medium, 600 semibold, 700 bold). Selects the matching static face or, for variable fonts such as SF Pro, the `wght` axis. Overrides `FontBold`. |
+| `FontVariations` | string | `""` | OpenType variation axes for variable fonts, e.g. `"opsz=18"` or `"opsz=18,GRAD=-20"`. Pango otherwise sets `opsz` to the point size automatically; pin it to match toolkits like Qt that leave it at the font's default. |
 | `AdaptiveBrightness` | bool | `true` | Follow the ambient light sensor for bar brightness. |
 | `ActiveBrightness` | u32 | `128` | Fixed brightness (0–255) when `AdaptiveBrightness = false`. |
 | `DoublePressSwitchLayers` | u32 | `0` | Double-press window in ms for Fn to swap the two layers persistently; `0` disables. |

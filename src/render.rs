@@ -461,7 +461,11 @@ pub(crate) fn draw_media_text(
         let layout = pangocairo::functions::create_layout(c);
         let mut font = style.font.clone();
         font.set_absolute_size(px * pango::SCALE as f64);
-        font.set_weight(if bold { pango::Weight::Bold } else { pango::Weight::Normal });
+        // The title is emboldened; the artist line keeps the configured
+        // label weight (FontWeight / FontBold) rather than forcing normal.
+        if bold {
+            font.set_weight(pango::Weight::Bold);
+        }
         layout.set_font_description(Some(&font));
         layout.set_text(text);
         layout.set_ellipsize(pango::EllipsizeMode::End);

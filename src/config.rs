@@ -78,6 +78,8 @@ struct ConfigProxy {
     enable_pixel_shift: Option<bool>,
     font_family: Option<String>,
     font_bold: Option<bool>,
+    font_weight: Option<u16>,
+    font_variations: Option<String>,
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
     double_press_switch_layers: Option<u32>,
@@ -120,6 +122,12 @@ impl ConfigProxy {
         }
         if o.font_bold.is_some() {
             self.font_bold = o.font_bold;
+        }
+        if o.font_weight.is_some() {
+            self.font_weight = o.font_weight;
+        }
+        if o.font_variations.is_some() {
+            self.font_variations = o.font_variations;
         }
         if o.adaptive_brightness.is_some() {
             self.adaptive_brightness = o.adaptive_brightness;
@@ -635,6 +643,8 @@ fn load_config(
     style.font = build_font(
         base.font_family.as_deref(),
         base.font_bold.unwrap_or(DEFAULT_FONT_BOLD),
+        base.font_weight,
+        base.font_variations.as_deref(),
         style.font_size,
     );
     // Load the background image once here (we know the bar size), if it wins.

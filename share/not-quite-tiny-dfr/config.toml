@@ -8,6 +8,8 @@
 # EnablePixelShift = false
 # FontFamily = ""
 # FontBold = true
+# FontWeight = 400          # 1-1000 (400 regular, 500 medium, 700 bold); overrides FontBold
+# FontVariations = ""       # variable-font axes, e.g. "opsz=18,GRAD=-20"
 # AdaptiveBrightness = true
 # ActiveBrightness = 128
 # DoublePressSwitchLayers = 0

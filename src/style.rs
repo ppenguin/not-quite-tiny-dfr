@@ -82,9 +82,21 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 /// Build the pango font description for text labels, CSS-style: `family` picks
-/// the font family (`None` = the system default sans), `bold` the weight, and
-/// `size_px` is the `FontSize` in device pixels.
-pub fn build_font(family: Option<&str>, bold: bool, size_px: f64) -> pango::FontDescription {
+/// the font family (`None` = the system default sans), `weight` (1..=1000, a
+/// CSS/OpenType weight) or else `bold` the weight, `variations` an optional
+/// OpenType axis list like `"opsz=18,GRAD=-20"`, and `size_px` is the
+/// `FontSize` in device pixels.
+///
+/// Pango normally sets a variable font's `opsz` axis to the point size; an
+/// explicit `opsz` in `variations` overrides that, which is how to match
+/// toolkits (Qt) that leave the axis at the font's default.
+pub fn build_font(
+    family: Option<&str>,
+    bold: bool,
+    weight: Option<u16>,
+    variations: Option<&str>,
+    size_px: f64,
+) -> pango::FontDescription {
     let mut font = pango::FontDescription::new();
     font.set_family(
         family
@@ -92,13 +104,26 @@ pub fn build_font(family: Option<&str>, bold: bool, size_px: f64) -> pango::Font
             .filter(|f| !f.is_empty())
             .unwrap_or("sans"),
     );
-    font.set_weight(if bold {
-        pango::Weight::Bold
-    } else {
-        pango::Weight::Normal
-    });
+    font.set_weight(font_weight(bold, weight));
+    if let Some(v) = variations.map(str::trim).filter(|v| !v.is_empty()) {
+        font.set_variations(Some(v));
+    }
     font.set_absolute_size(size_px * pango::SCALE as f64);
     font
+}
+
+/// The pango weight for the `FontWeight` / `FontBold` pair: an explicit numeric
+/// weight wins (clamped to the 1..=1000 range pango accepts, so both static
+/// faces like "Medium" and variable fonts' `wght` axis resolve), otherwise
+/// `FontBold` picks bold (700) or normal (400).
+pub fn font_weight(bold: bool, weight: Option<u16>) -> pango::Weight {
+    match weight {
+        // Go through glib so known values (400, 700, ...) map to their named
+        // variants and anything else becomes `__Unknown(n)`, as pango does.
+        Some(w) => unsafe { pango::glib::translate::from_glib(i32::from(w.clamp(1, 1000))) },
+        None if bold => pango::Weight::Bold,
+        None => pango::Weight::Normal,
+    }
 }
 
 /// Whether the resolved background should be a solid color or an image. Records
@@ -145,7 +170,7 @@ impl Default for Style {
     fn default() -> Style {
         // Defaults reproduce the original hardcoded look.
         Style {
-            font: build_font(None, true, 32.0),
+            font: build_font(None, true, None, None, 32.0),
             background: Color::rgb(0.0, 0.0, 0.0),
             background_image: None,
             button_color: Color::rgb(0.2, 0.2, 0.2),
@@ -276,8 +301,8 @@ impl StyleProxy {
         let d = Style::default();
         Style {
             // Placeholder at the right size; the config loader rebuilds it
-            // with the configured FontFamily/FontBold.
-            font: build_font(None, true, self.font_size.unwrap_or(d.font_size)),
+            // with the configured FontFamily/FontBold/FontWeight/FontVariations.
+            font: build_font(None, true, None, None, self.font_size.unwrap_or(d.font_size)),
             background: self.background.unwrap_or(d.background),
             background_image: None,
             button_color: self.button_color.unwrap_or(d.button_color),
@@ -314,6 +339,19 @@ impl StyleProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_weight_numeric_overrides_bold() {
+        assert_eq!(font_weight(true, None), pango::Weight::Bold);
+        assert_eq!(font_weight(false, None), pango::Weight::Normal);
+        // Explicit weight wins over FontBold; pango's enum maps the CSS values.
+        assert_eq!(font_weight(true, Some(400)), pango::Weight::Normal);
+        assert_eq!(font_weight(false, Some(500)), pango::Weight::Medium);
+        assert_eq!(font_weight(false, Some(700)), pango::Weight::Bold);
+        // Out-of-range values clamp into what pango accepts.
+        assert_eq!(font_weight(false, Some(0)), pango::Weight::__Unknown(1));
+        assert_eq!(font_weight(false, Some(5000)), pango::Weight::Ultraheavy);
+    }
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9

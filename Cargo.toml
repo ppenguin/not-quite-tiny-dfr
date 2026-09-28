@@ -12,7 +12,7 @@ repository = "https://github.com/seojoonlee-dev/not-quite-tiny-dfr.git"
 [dependencies]
 cairo-rs = { version = "0.22", default-features = false, features = ["png"] }
 librsvg-rebind = "0.3"
-pango = "0.22"
+pango = { version = "0.22", features = ["v1_44"] }
 pangocairo = "0.22"
 drm = "0.14"
 anyhow = "1"
