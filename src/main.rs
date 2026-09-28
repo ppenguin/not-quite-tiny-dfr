@@ -1154,6 +1154,12 @@ impl FunctionLayer {
             let shift_x = pixel_shift_x + (pixel_shift_width / 2) as f64;
             let h = height as f64;
             let w = width as f64;
+            // The band slides underneath the pinned buttons, which are painted
+            // on top afterwards (see `paint_pinned`); a change to either side
+            // therefore always repaints the whole bar so the stacking stays
+            // right. (The main loop already promotes any change to a complete
+            // redraw; this keeps the invariant local.)
+            let complete_redraw = complete_redraw || self.pinned_count > 0;
             let mut modified_regions = if complete_redraw {
                 vec![ClipRect::new(0, 0, height as u16, width as u16)]
             } else {
@@ -1164,83 +1170,35 @@ impl FunctionLayer {
                 c.paint().unwrap();
             }
             // Pinned buttons hold still during a layer slide when the
-            // transition keeps them static; otherwise they ride along (and
-            // the incoming layer draws its own copy sliding in instead of
-            // skipping it).
+            // transition keeps them static (the caller paints them on top via
+            // `draw_pinned` once every pass is composed); otherwise they ride
+            // along and each pass paints its own copy after its band.
             let pinned_stay = static_count > 0;
-            c.save().unwrap();
-            if !pinned_stay {
-                c.translate(slide_offset, 0.0);
-            }
-            for i in 0..if base_pass || !pinned_stay {
-                self.pinned_count
-            } else {
-                0
-            } {
-                let end = if i + 1 < self.buttons.len() {
-                    self.buttons[i + 1].0
-                } else {
-                    self.virtual_button_count
-                };
-                let (start, button) = &mut self.buttons[i];
-                if !button.changed && !complete_redraw {
-                    continue;
-                }
-                let span = (end - *start) as f64;
-                let button_width = span * geo.slot_width + (span - 1.0) * spacing;
-                let radius = radius.min(button_width / 2.0);
-                let left_edge = edge + *start as f64 * geo.pitch + shift_x;
-                if !complete_redraw {
-                    set_background_source(&c, style, bg_shift);
-                    c.rectangle(
-                        left_edge,
-                        bot - radius,
-                        button_width,
-                        top - bot + radius * 2.0,
-                    );
-                    c.fill().unwrap();
-                    modified_regions.push(ClipRect::new(
-                        (h - top - radius).clamp(0.0, h) as u16,
-                        left_edge.clamp(0.0, w) as u16,
-                        (h - bot + radius).clamp(0.0, h) as u16,
-                        (left_edge + button_width).clamp(0.0, w) as u16,
-                    ));
-                }
-                paint_button(
-                    &c,
-                    button,
-                    style,
-                    config.show_button_outlines,
-                    left_edge,
-                    button_width,
-                    radius,
-                    bot,
-                    top,
-                    height,
-                    pixel_shift_y,
-                );
-                button.changed = false;
-            }
-            c.restore().unwrap();
-            // The band, clipped to its region so wrapped copies (and partial
-            // clears) never bleed over the pinned Esc or off the bar. During
-            // a layer slide the window travels with the layer (second clip,
-            // in slid space) but stays inside the fixed band area (first
-            // clip), so it can never cover a held-still Esc; with nothing
-            // held still the fixed clip opens up to the whole bar.
+            // The band, clipped to its window: the bar inside the edge
+            // padding, as a rounded rect of the button radius so a button
+            // sliding off either end is cut with rounded corners rather than
+            // a straight line. The window extends left under the pinned
+            // buttons: scrolled-off buttons slide underneath them and stay
+            // visible around their rounded corners. During a layer slide the
+            // window travels with the layer (second clip, in slid space) but
+            // stays inside the fixed area (first clip); with nothing held
+            // still the fixed clip opens up to the whole bar.
             let region_left = geo.region_left + shift_x;
-            let fixed_left = if pinned_stay { region_left } else { 0.0 };
+            let band_left = edge + shift_x;
+            let band_right = region_left + geo.region_width;
             c.save().unwrap();
-            c.rectangle(
-                fixed_left,
-                0.0,
-                region_left + geo.region_width - fixed_left,
-                h,
-            );
+            if pinned_stay {
+                rounded_rect_path(&c, band_left, band_right - band_left, radius, bot, top);
+            } else {
+                c.rectangle(0.0, 0.0, band_right, h);
+            }
             c.clip();
             c.translate(slide_offset, 0.0);
-            c.rectangle(region_left, 0.0, geo.region_width, h);
+            rounded_rect_path(&c, band_left, band_right - band_left, radius, bot, top);
             c.clip();
+            // How far left of the band's origin a button stays visible (the
+            // pinned area it slides under).
+            let under_left = geo.region_left - edge;
             for i in self.pinned_count..self.buttons.len() {
                 let end = if i + 1 < self.buttons.len() {
                     self.buttons[i + 1].0
@@ -1277,7 +1235,7 @@ impl FunctionLayer {
                     f64::INFINITY
                 };
                 for base in [x0, wrap_copy] {
-                    if base >= geo.region_width || base + button_width <= 0.0 {
+                    if base >= geo.region_width || base + button_width <= -under_left {
                         continue;
                     }
                     let left_edge = region_left + base;
@@ -1295,7 +1253,7 @@ impl FunctionLayer {
                         // with stale pixels.
                         modified_regions.push(ClipRect::new(
                             (h - top - radius).clamp(0.0, h) as u16,
-                            left_edge.max(region_left).clamp(0.0, w) as u16,
+                            left_edge.max(band_left).clamp(0.0, w) as u16,
                             (h - bot + radius).clamp(0.0, h) as u16,
                             (left_edge + button_width)
                                 .min(region_left + geo.region_width)
@@ -1319,6 +1277,14 @@ impl FunctionLayer {
                 button.changed = false;
             }
             c.restore().unwrap();
+            if !pinned_stay {
+                // Riding along with the slide: paint this pass's own pinned
+                // buttons on top of its band.
+                c.save().unwrap();
+                c.translate(slide_offset, 0.0);
+                self.paint_pinned(&c, config, style, &geo, shift_x, radius, bot, top, height, pixel_shift_y, bg_shift);
+                c.restore().unwrap();
+            }
             return modified_regions;
         }
 
@@ -1430,6 +1396,104 @@ impl FunctionLayer {
         c.restore().unwrap();
 
         modified_regions
+    }
+
+    /// Paint the pinned buttons of a scrolling layer on top of whatever is
+    /// already on the surface: each gets the background painted back inside
+    /// its rounded rect first, so band buttons sliding underneath show only
+    /// around its corners, then the button itself. Bar-space `c`.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_pinned(
+        &mut self,
+        c: &Context,
+        config: &Config,
+        style: &style::Style,
+        geo: &ScrollGeometry,
+        shift_x: f64,
+        radius: f64,
+        bot: f64,
+        top: f64,
+        height: i32,
+        pixel_shift_y: f64,
+        bg_shift: (f64, f64),
+    ) {
+        let spacing = style.button_spacing;
+        let edge = style.edge_padding;
+        for i in 0..self.pinned_count {
+            let end = if i + 1 < self.buttons.len() {
+                self.buttons[i + 1].0
+            } else {
+                self.virtual_button_count
+            };
+            let (start, button) = &mut self.buttons[i];
+            let span = (end - *start) as f64;
+            let button_width = span * geo.slot_width + (span - 1.0) * spacing;
+            let radius = radius.min(button_width / 2.0);
+            let left_edge = edge + *start as f64 * geo.pitch + shift_x;
+            c.save().unwrap();
+            rounded_rect_path(c, left_edge, button_width, radius, bot, top);
+            c.clip();
+            set_background_source(c, style, bg_shift);
+            c.paint().unwrap();
+            c.restore().unwrap();
+            paint_button(
+                c,
+                button,
+                style,
+                config.show_button_outlines,
+                left_edge,
+                button_width,
+                radius,
+                bot,
+                top,
+                height,
+                pixel_shift_y,
+            );
+            button.changed = false;
+        }
+    }
+
+    /// Paint the held-still pinned buttons of a scrolling layer on top of the
+    /// composed frame. Call after every `draw` pass of a frame; does nothing
+    /// for layers whose pinned buttons ride along with slides (they paint
+    /// their own inside `draw`) or that don't scroll (the plain layout has no
+    /// stacking). Geometry mirrors `draw`.
+    fn draw_pinned(
+        &mut self,
+        config: &Config,
+        width: i32,
+        height: i32,
+        surface: &Surface,
+        pixel_shift: (f64, f64),
+    ) {
+        if self.swipe_pinned_count() == 0 {
+            return;
+        }
+        let style = &config.style;
+        let shift_background = style.background_image.is_some();
+        let (pixel_shift, bg_shift) = if shift_background {
+            ((0.0, 0.0), pixel_shift)
+        } else {
+            (pixel_shift, (0.0, 0.0))
+        };
+        let pixel_shift_width = if config.enable_pixel_shift && !shift_background {
+            PIXEL_SHIFT_WIDTH_PX
+        } else {
+            0
+        };
+        let effective_width = (width - pixel_shift_width as i32) as f64;
+        let Some(geo) = self.scroll_geometry(effective_width, style) else {
+            return;
+        };
+        let c = Context::new(surface).unwrap();
+        c.translate(height as f64, 0.0);
+        c.rotate((90.0f64).to_radians());
+        let margin = (1.0 - style.height_percent / 100.0) / 2.0;
+        let bot = (height as f64) * margin;
+        let top = (height as f64) * (1.0 - margin);
+        let radius = style.corner_radius.clamp(0.0, (top - bot) / 2.0);
+        let shift_x = pixel_shift.0 + (pixel_shift_width / 2) as f64;
+        self.paint_pinned(&c, config, style, &geo, shift_x, radius, bot, top, height, pixel_shift.1, bg_shift);
     }
 
     fn hit(
@@ -2573,9 +2637,12 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                         stay,
                         false,
                     );
+                    if stay {
+                        layers[active_layer].draw_pinned(&cfg, width as i32, height as i32, &surface, shift);
+                    }
                     clips
                 } else {
-                    layers[active_layer].draw(
+                    let clips = layers[active_layer].draw(
                         &cfg,
                         width as i32,
                         height as i32,
@@ -2585,7 +2652,9 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                         0.0,
                         true,
                         true,
-                    )
+                    );
+                    layers[active_layer].draw_pinned(&cfg, width as i32, height as i32, &surface, shift);
+                    clips
                 };
                 if cfg.style.round_display_corners {
                     mask_display_corners(&surface, width as i32, height as i32, cfg.style.corner_radius);
@@ -3521,6 +3590,81 @@ mod tests {
         assert!(text_layer(14, 1, 6)
             .scroll_geometry(W as f64, &style)
             .is_some());
+    }
+
+    fn test_config(style: Style) -> Config {
+        Config {
+            show_button_outlines: true,
+            enable_pixel_shift: false,
+            adaptive_brightness: false,
+            active_brightness: 128,
+            double_press_switch_layers: 0,
+            dim_timeout: 0,
+            off_timeout: 0,
+            layer_swipe: true,
+            lyric_offset: 0.0,
+            media_cover_blur: false,
+            media_art_cache: false,
+            media_lyrics_cache: false,
+            style,
+        }
+    }
+
+    /// Render one complete frame (band, then the held-still pinned buttons on
+    /// top) and return a bar-space pixel reader for it.
+    fn render_frame(layer: &mut FunctionLayer, cfg: &Config) -> impl Fn(f64, f64) -> (u8, u8, u8) {
+        let mut surface = ImageSurface::create(Format::ARgb32, H as i32, W as i32).unwrap();
+        layer.draw(cfg, W as i32, H as i32, &surface, (0.0, 0.0), true, 0.0, true, true);
+        layer.draw_pinned(cfg, W as i32, H as i32, &surface, (0.0, 0.0));
+        surface.flush();
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap().to_vec();
+        move |x: f64, y: f64| {
+            // Bar-space (x, y) -> framebuffer pixel, matching the draw rotation.
+            let (row, col) = (x as usize, (H as f64 - 1.0 - y) as usize);
+            let o = row * stride + col * 4;
+            (data[o], data[o + 1], data[o + 2])
+        }
+    }
+
+    #[test]
+    fn band_slides_under_pinned_esc_which_stays_on_top() {
+        let mut style = Style::default(); // black background, spacing 16, radius 8
+        style.edge_padding = 12.0;
+        // Translucent fill so a button showing through another would read brighter.
+        style.button_color = style::Color { r: 1.0, g: 1.0, b: 1.0, a: 0.5 };
+        let cfg = test_config(style);
+        let mut layer = text_layer(14, 1, 6);
+        let geo = layer.scroll_geometry(W as f64, &cfg.style).unwrap();
+        let (edge, slot, spacing) = (12.0, geo.slot_width, 16.0);
+        let esc_right = edge + slot;
+        let mid = H as f64 / 2.0;
+        // Scroll the first band button half a pitch left: it now straddles the
+        // gap and the right part of the Esc.
+        layer.scroll_offset = geo.pitch / 2.0;
+        let px = render_frame(&mut layer, &cfg);
+        let fill = px(edge + 10.0, mid); // Esc interior, nothing underneath
+        assert_eq!(fill, (128, 128, 128), "translucent fill over black");
+        // The gap between Esc and the band shows the button sliding through.
+        assert_eq!(px(esc_right + spacing / 2.0, mid), fill, "band visible in the gap");
+        // Esc stays on top: where the band button passes under it, the pixel is
+        // exactly the Esc-only fill, not the two fills stacked.
+        assert_eq!(px(esc_right - 2.0, mid), fill, "esc opaque over the band");
+        // Above/below the buttons is still background.
+        assert_eq!(px(esc_right + spacing / 2.0, 1.0), (0, 0, 0));
+        // The window's right end cuts the straddling button with a rounded
+        // corner: visible at mid-height, background in the corner.
+        // (Sampled above the label text, clear of the corner arc.)
+        let bot = H as f64 * 0.05;
+        assert_eq!(px(W as f64 - edge - 10.0, bot + 5.0), fill, "band visible up to the right padding");
+        assert_eq!(px(W as f64 - edge - 1.0, bot), (0, 0, 0), "rounded cut at the right end");
+        // And the same at the left: the button is not visible off the bar's
+        // left padding, and the cut there is rounded too.
+        layer.scroll_offset = geo.pitch + slot / 2.0; // B1 now spans across x = 0
+        let px = render_frame(&mut layer, &cfg);
+        assert_eq!(px(edge / 2.0, mid), (0, 0, 0), "clipped at the edge padding");
+        assert_eq!(px(edge + 10.0, bot + 5.0), fill, "esc unaffected by the window");
+        assert_eq!(px(edge, bot), (0, 0, 0), "rounded cut at the left end");
     }
 
     #[test]
