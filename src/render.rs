@@ -16,8 +16,8 @@ use cairo::{Context, Format, ImageSurface, Surface};
 use std::time::Instant;
 
 /// The three transport controls of a Media widget, left to right. Also the
-/// tap-zone identity: the widget's width is split into three equal columns.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// tap-zone identity: prev / play-pause / next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MediaZone {
     Prev,
     PlayPause,
@@ -228,27 +228,45 @@ pub(crate) fn mask_display_corners(surface: &Surface, width: i32, height: i32, r
 }
 
 /// The transport-control layout for a media panel: `(first_zone_left,
-/// zone_width)`. Active (now-playing) clusters the three controls on the right
-/// so the album text has the left; idle spreads them across the full width.
-/// Shared by rendering and hit-testing so taps land on the drawn icons.
-pub(crate) fn media_zone_geom(active: bool, left_edge: f64, button_width: f64, icon_w: f64) -> (f64, f64) {
+/// zone_width, zone_pitch)`. Active (now-playing) clusters the three controls
+/// on the right so the album text has the left; idle lays them out as three
+/// equal buttons across the full span, separated by the style's `ButtonSpacing`
+/// so the row matches the gaps between the bar's other buttons. Shared by
+/// rendering and hit-testing so taps land on the drawn icons.
+pub(crate) fn media_zone_geom(
+    active: bool,
+    left_edge: f64,
+    button_width: f64,
+    icon_w: f64,
+    spacing: f64,
+) -> (f64, f64, f64) {
     if active {
         let zone_w = icon_w + MEDIA_ICON_PAD * 2.0;
         let cluster = (zone_w * 3.0).min(button_width);
-        (left_edge + button_width - cluster - MEDIA_PAD, cluster / 3.0)
+        (left_edge + button_width - cluster - MEDIA_PAD, cluster / 3.0, cluster / 3.0)
     } else {
-        (left_edge, button_width / 3.0)
+        let spacing = spacing.max(0.0).min(button_width / 3.0);
+        let zone_w = (button_width - spacing * 2.0) / 3.0;
+        (left_edge, zone_w, zone_w + spacing)
     }
 }
 
 /// Which transport zone a touch at panel-relative x falls in, or `None` for the
-/// inert text area of an active panel.
-pub(crate) fn media_zone_at(active: bool, x: f64, left_edge: f64, button_width: f64, icon_w: f64) -> Option<MediaZone> {
-    let (first, zone_w) = media_zone_geom(active, left_edge, button_width, icon_w);
-    if zone_w <= 0.0 || x < first || x >= first + zone_w * 3.0 {
+/// inert text area of an active panel. A touch in the gap between two idle
+/// transport buttons counts for the button on its left.
+pub(crate) fn media_zone_at(
+    active: bool,
+    x: f64,
+    left_edge: f64,
+    button_width: f64,
+    icon_w: f64,
+    spacing: f64,
+) -> Option<MediaZone> {
+    let (first, zone_w, pitch) = media_zone_geom(active, left_edge, button_width, icon_w, spacing);
+    if zone_w <= 0.0 || x < first || x >= first + pitch * 2.0 + zone_w {
         return None;
     }
-    Some(match ((x - first) / zone_w) as usize {
+    Some(match ((x - first) / pitch) as usize {
         0 => MediaZone::Prev,
         1 => MediaZone::PlayPause,
         _ => MediaZone::Next,
@@ -437,33 +455,34 @@ pub(crate) fn paint_media(
             c.clip();
             c.push_group();
             // Track text on the left, up to the control cluster.
-            let (first, zone_w) = media_zone_geom(true, left_edge, button_width, icon_w);
+            let (first, zone_w, pitch) = media_zone_geom(true, left_edge, button_width, icon_w, 0.0);
             let text_left = left_edge + MEDIA_PAD;
             let text_width = (first - text_left - MEDIA_PAD).max(0.0);
             if text_width > 8.0 {
                 draw_media_text(c, style, text_color, &info.title, &info.artist, text_left, text_width, bot, top);
             }
-            draw_media_icons(c, m, &info, icon_w, first, zone_w, height, y_shift);
+            draw_media_icons(c, m, &info, icon_w, first, zone_w, pitch, height, y_shift);
             c.pop_group_to_source().unwrap();
             c.paint_with_alpha(controls_alpha).unwrap();
             c.restore().unwrap();
         }
     } else {
-        // Idle: three transport buttons spread across the full width.
-        let (first, zone_w) = media_zone_geom(false, left_edge, button_width, icon_w);
+        // Idle: three transport buttons laid out like ordinary bar buttons
+        // across the full span, `ButtonSpacing` apart.
+        let (first, zone_w, pitch) = media_zone_geom(false, left_edge, button_width, icon_w, style.button_spacing);
+        let radius = radius.min(zone_w / 2.0);
         for (k, zone) in [MediaZone::Prev, MediaZone::PlayPause, MediaZone::Next].into_iter().enumerate() {
-            let zleft = first + zone_w * k as f64;
-            let inset = MEDIA_ICON_PAD.min(zone_w / 4.0);
+            let zleft = first + pitch * k as f64;
             let fill = if m.pressed == Some(zone) {
                 style.button_color_active
             } else {
                 style.button_color
             };
             fill.set_source(c);
-            rounded_rect_path(c, zleft + inset, zone_w - inset * 2.0, radius, bot, top);
+            rounded_rect_path(c, zleft, zone_w, radius, bot, top);
             c.fill().unwrap();
         }
-        draw_media_icons(c, m, &info, icon_w, first, zone_w, height, y_shift);
+        draw_media_icons(c, m, &info, icon_w, first, zone_w, pitch, height, y_shift);
     }
 }
 
@@ -477,6 +496,7 @@ pub(crate) fn draw_media_icons(
     icon_w: f64,
     first_zone_left: f64,
     zone_w: f64,
+    zone_pitch: f64,
     height: i32,
     y_shift: f64,
 ) {
@@ -488,7 +508,7 @@ pub(crate) fn draw_media_icons(
     let icons = [m.prev_icon.as_ref(), play, m.next_icon.as_ref()];
     for (k, svg) in icons.into_iter().enumerate() {
         let Some(svg) = svg else { continue };
-        let center = first_zone_left + zone_w * (k as f64 + 0.5);
+        let center = first_zone_left + zone_pitch * k as f64 + zone_w / 2.0;
         let x = (center - icon_w / 2.0).round();
         let y = (y_shift + (height as f64 - icon_w) / 2.0).round();
         svg.render(c, x, y, icon_w, icon_w);
@@ -626,5 +646,33 @@ pub(crate) fn draw_media_lyrics(
         draw(line, mid_y + (1.0 - p) * step, p);
     } else {
         draw(line, mid_y, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_media_zones_are_button_spacing_apart() {
+        let (first, zone_w, pitch) = media_zone_geom(false, 100.0, 336.0, 44.0, 12.0);
+        assert_eq!(first, 100.0);
+        assert!((zone_w - 104.0).abs() < 1e-9);
+        assert!((pitch - 116.0).abs() < 1e-9);
+        // The three zones fill the span exactly.
+        assert!((first + pitch * 2.0 + zone_w - 436.0).abs() < 1e-9);
+        // Hit-testing follows the drawn rects; a gap counts for the button on its left.
+        assert_eq!(media_zone_at(false, 100.0, 100.0, 336.0, 44.0, 12.0), Some(MediaZone::Prev));
+        assert_eq!(media_zone_at(false, 210.0, 100.0, 336.0, 44.0, 12.0), Some(MediaZone::Prev));
+        assert_eq!(media_zone_at(false, 216.0, 100.0, 336.0, 44.0, 12.0), Some(MediaZone::PlayPause));
+        assert_eq!(media_zone_at(false, 435.0, 100.0, 336.0, 44.0, 12.0), Some(MediaZone::Next));
+        assert_eq!(media_zone_at(false, 436.0, 100.0, 336.0, 44.0, 12.0), None);
+    }
+
+    #[test]
+    fn active_media_cluster_ignores_button_spacing() {
+        let a = media_zone_geom(true, 0.0, 600.0, 44.0, 0.0);
+        let b = media_zone_geom(true, 0.0, 600.0, 44.0, 40.0);
+        assert_eq!(a, b);
     }
 }

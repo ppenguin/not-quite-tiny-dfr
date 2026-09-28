@@ -3120,7 +3120,7 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                                             let zone = layer
                                                 .button_screen_rect(btn, width as f64, &cfg.style)
                                                 .and_then(|(left, w)| {
-                                                    media_zone_at(active, x, left, w, icon_w)
+                                                    media_zone_at(active, x, left, w, icon_w, cfg.style.button_spacing)
                                                 });
                                             if let ButtonImage::Media(m) =
                                                 &mut layer.buttons[btn].1.image
@@ -3418,7 +3418,7 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                                             let zone = layers[layer]
                                                 .button_screen_rect(btn, width as f64, &cfg.style)
                                                 .and_then(|(left, w)| {
-                                                    media_zone_at(active, start_x, left, w, icon_w)
+                                                    media_zone_at(active, start_x, left, w, icon_w, cfg.style.button_spacing)
                                                 });
                                             let button = &mut layers[layer].buttons[btn].1;
                                             if let ButtonImage::Media(m) = &mut button.image {
