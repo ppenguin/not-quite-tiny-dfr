@@ -1657,7 +1657,20 @@ fn main() {
     let mut drm = DrmBackend::open_card().unwrap();
     let mut uinput = create_uinput();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| real_main(&mut drm, &mut uinput)));
+    // A panic because the panel vanished is not a crash to show: emergency
+    // mode would sit forever on the dead fd. Exit instead so systemd
+    // (Restart=always) brings us back up on the re-registered card.
+    if let Err(err) = drm.fb_info() {
+        if display::is_device_gone(&err) {
+            exit_device_gone(&err);
+        }
+    }
     emergency_mode(&mut drm, &mut uinput);
+}
+
+fn exit_device_gone(err: &anyhow::Error) -> ! {
+    println!("touchbar display gone ({err}); exiting for a restart on the new device");
+    std::process::exit(1);
 }
 
 fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
@@ -2594,7 +2607,11 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                     }
                     let data = surface.data().unwrap();
                     {
-                        let mut map = drm.map().unwrap();
+                        let mut map = match drm.map() {
+                            Ok(map) => map,
+                            Err(err) if display::is_device_gone(&err) => exit_device_gone(&err),
+                            Err(err) => panic!("{err}"),
+                        };
                         let out = &mut map.as_mut()[..data.len()];
                         let dim = backlight.soft_dim_factor();
                         if dim < 1.0 {
@@ -2616,6 +2633,9 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                         }
                     }
                     if let Err(err) = drm.dirty(&clips) {
+                        if display::is_device_gone(&err) {
+                            exit_device_gone(&err);
+                        }
                         // A struggling appletbdrm surfaces its errors here;
                         // panicking into emergency mode would only pile more
                         // traffic onto a panel that needs the opposite.
@@ -2712,7 +2732,11 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
         if backlight.current_bl() > 0 && !frame_pending && Instant::now() >= next_frame {
             if last_flush.elapsed() >= HEARTBEAT_INTERVAL {
                 let t0 = Instant::now();
-                let _ = drm.dirty(&[ClipRect::new(0, 0, 1, 1)]);
+                if let Err(err) = drm.dirty(&[ClipRect::new(0, 0, 1, 1)]) {
+                    if display::is_device_gone(&err) {
+                        exit_device_gone(&err);
+                    }
+                }
                 last_flush = Instant::now();
                 if last_flush - t0 >= FLUSH_STALL_MIN {
                     // Even the tiny poke stalled: a desync is active. Fold into

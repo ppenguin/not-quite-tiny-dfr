@@ -49,6 +49,16 @@ impl Drop for DrmBackend {
     }
 }
 
+/// The panel's DRM device was unplugged under us: appletbdrm unbinds and
+/// re-registers as a new card when the T2 re-enumerates its USB devices
+/// (suspend/resume, BCE reset). Every ioctl on the old fd then fails with
+/// ENODEV, so the only way back is a fresh open_card().
+pub fn is_device_gone(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .and_then(|e| e.raw_os_error())
+        == Some(libc::ENODEV)
+}
+
 fn find_prop_id<T: ResourceHandle>(
     card: &Card,
     handle: T,
