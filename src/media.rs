@@ -133,6 +133,12 @@ pub struct LyricsInfo {
     /// first line, or on a blank line (instrumental breaks / bridges are marked
     /// with empty lines in LRC). The widget shows the controls/title then.
     pub in_gap: bool,
+    /// Set when a fetch publishes freshly loaded lines; consumed by the
+    /// lyric-sync thread to adopt the seeded gap state instead of debouncing
+    /// into it. An explicit flag rather than a "did the last tick see lyrics"
+    /// sample: a cache hit loads faster than a sync tick, so the no-lyrics
+    /// window between tracks can pass entirely unobserved.
+    pub fresh: bool,
     /// Bumped whenever the display should change (lines loaded, line advanced).
     pub generation: u64,
 }
@@ -149,6 +155,7 @@ pub static LYRICS_STATE: Mutex<LyricsInfo> = Mutex::new(LyricsInfo {
     lines: Vec::new(),
     current: 0,
     in_gap: false,
+    fresh: false,
     generation: 0,
 });
 
@@ -714,6 +721,7 @@ fn fetch_lyrics(
         // fresh load so it doesn't reverse the decision.
         ly.in_gap = gap_at(&lines, pos);
         ly.lines = lines;
+        ly.fresh = true;
         ly.generation = ly.generation.wrapping_add(1);
         notify(&wake);
     });
@@ -876,6 +884,7 @@ fn spawn_metadata_thread(wake: Arc<OwnedFd>) {
                     ly.lines.clear();
                     ly.current = 0;
                     ly.in_gap = false;
+                    ly.fresh = false;
                     ly.status = if real {
                         LyricsStatus::Loading
                     } else {
@@ -913,9 +922,6 @@ fn spawn_lyric_sync_thread(wake: Arc<OwnedFd>) {
         // position against small backward jitter; only a large drop (a real
         // seek, or a new track) moves it back.
         let mut mono_pos: Option<f64> = None;
-        // Whether lyrics were present on the previous tick, so a fresh load
-        // (none -> synced) can be detected and its debounce pre-satisfied.
-        let mut had_lyrics = false;
         loop {
             // Derive the current position from the anchor (no playerctl here).
             if let Some(derived) = derived_position() {
@@ -930,8 +936,8 @@ fn spawn_lyric_sync_thread(wake: Arc<OwnedFd>) {
                     // rather than debouncing into it: pre-satisfy the debounce so
                     // lyrics that land during an intro/break stay on the controls
                     // instead of flashing on for `GAP_DEBOUNCE` and hiding again.
-                    if !had_lyrics {
-                        had_lyrics = true;
+                    if ly.fresh {
+                        ly.fresh = false;
                         gap_start = gap_at(&ly.lines, pos).then_some(pos - GAP_DEBOUNCE);
                     }
                     let mut changed = false;
@@ -966,9 +972,7 @@ fn spawn_lyric_sync_thread(wake: Arc<OwnedFd>) {
                         notify(&wake);
                     }
                 } else {
-                    // No lyrics (track changed / still fetching): the next load
-                    // counts as fresh.
-                    had_lyrics = false;
+                    // No lyrics (track changed / still fetching).
                     gap_start = None;
                 }
             }
