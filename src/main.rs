@@ -2587,6 +2587,9 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                         true,
                     )
                 };
+                if cfg.style.round_display_corners {
+                    mask_display_corners(&surface, width as i32, height as i32, cfg.style.corner_radius);
+                }
                 let draw_done = Instant::now();
                 // A changed button that is scrolled out of view produces no dirty
                 // rects; flushing zero clips is EINVAL (this crashed the daemon),

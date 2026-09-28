@@ -157,6 +157,9 @@ pub struct Style {
     /// Padding in px between the left/right screen edges and the first/last button.
     pub edge_padding: f64,
     pub corner_radius: f64,
+    /// Round the four corners of the whole display at `corner_radius`, painting
+    /// everything outside that rounded rectangle opaque black.
+    pub round_display_corners: bool,
     pub font_size: f64,
     /// Extra spacing between glyphs in px (negative tightens). Applied to every
     /// text layout; useful for fonts whose native tracking pango doesn't apply.
@@ -183,6 +186,7 @@ impl Default for Style {
             button_spacing: 16.0,
             edge_padding: 0.0,
             corner_radius: 8.0,
+            round_display_corners: false,
             font_size: 32.0,
             letter_spacing: 0.0,
             icon_size: 48.0,
@@ -212,6 +216,7 @@ pub struct StyleProxy {
     pub button_spacing: Option<f64>,
     pub edge_padding: Option<f64>,
     pub corner_radius: Option<f64>,
+    pub round_display_corners: Option<bool>,
     pub font_size: Option<f64>,
     pub letter_spacing: Option<f64>,
     pub icon_size: Option<f64>,
@@ -253,6 +258,9 @@ impl<'de> Deserialize<'de> for StyleProxy {
                         "ButtonSpacing" => s.button_spacing = Some(map.next_value()?),
                         "EdgePadding" => s.edge_padding = Some(map.next_value()?),
                         "CornerRadius" => s.corner_radius = Some(map.next_value()?),
+                        "RoundDisplayCorners" => {
+                            s.round_display_corners = Some(map.next_value()?)
+                        }
                         "FontSize" => s.font_size = Some(map.next_value()?),
                         "LetterSpacing" => s.letter_spacing = Some(map.next_value()?),
                         "IconSize" => s.icon_size = Some(map.next_value()?),
@@ -293,6 +301,7 @@ impl StyleProxy {
         self.button_spacing = user.button_spacing.or(self.button_spacing);
         self.edge_padding = user.edge_padding.or(self.edge_padding);
         self.corner_radius = user.corner_radius.or(self.corner_radius);
+        self.round_display_corners = user.round_display_corners.or(self.round_display_corners);
         self.font_size = user.font_size.or(self.font_size);
         self.letter_spacing = user.letter_spacing.or(self.letter_spacing);
         self.icon_size = user.icon_size.or(self.icon_size);
@@ -319,6 +328,7 @@ impl StyleProxy {
             button_spacing: self.button_spacing.unwrap_or(d.button_spacing),
             edge_padding: self.edge_padding.unwrap_or(d.edge_padding).max(0.0),
             corner_radius: self.corner_radius.unwrap_or(d.corner_radius),
+            round_display_corners: self.round_display_corners.unwrap_or(d.round_display_corners),
             font_size: self.font_size.unwrap_or(d.font_size),
             letter_spacing: self.letter_spacing.unwrap_or(d.letter_spacing),
             icon_size: self.icon_size.unwrap_or(d.icon_size).max(0.0),
@@ -418,6 +428,17 @@ mod tests {
         let user: StyleProxy = toml::from_str("BackgroundImageBlur = false").unwrap();
         base.merge(user);
         assert_eq!(base.background_image_blur, Some(false));
+    }
+
+    #[test]
+    fn round_display_corners_parses_and_merges() {
+        let mut base: StyleProxy = toml::from_str("CornerRadius = 14").unwrap();
+        assert!(!base.resolve().round_display_corners); // default off
+        let user: StyleProxy = toml::from_str("RoundDisplayCorners = true").unwrap();
+        base.merge(user);
+        let style = base.resolve();
+        assert!(style.round_display_corners);
+        assert!(approx(style.corner_radius, 14.0));
     }
 
     #[test]

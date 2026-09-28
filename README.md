@@ -133,6 +133,7 @@ Colors are hex strings: `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`.
 | `ButtonSpacing` | number | `16` | Gap between buttons in px; `0` makes a seamless strip. |
 | `EdgePadding` | number | `0` | Padding between the screen edges and the first/last button, in px. |
 | `CornerRadius` | number | `8` | Button corner radius in px. |
+| `RoundDisplayCorners` | bool | `false` | Round the four corners of the whole display at `CornerRadius`; everything outside is black. |
 | `FontSize` | number | `32` | Label font size in px. |
 | `LetterSpacing` | number | `0` | Extra spacing between glyphs in px; negative tightens. Pango ignores a font's own tracking table, so this is how to recover e.g. SF Pro's tighter display-size spacing. |
 | `IconSize` | number | `48` | Default icon size in px (per-button `IconWidth`/`IconHeight` override it). |

@@ -12,7 +12,7 @@ use crate::{
     ease_expand, CachedSvg, MEDIA_COVER_DARKEN, MEDIA_ICON_PAD, MEDIA_LYRIC_ANIM, MEDIA_PAD,
     MEDIA_TEXT_GAP, MEDIA_TEXT_VPAD, MEDIA_VIEW_ANIM,
 };
-use cairo::{Context, Format, ImageSurface};
+use cairo::{Context, Format, ImageSurface, Surface};
 use std::time::Instant;
 
 /// The three transport controls of a Media widget, left to right. Also the
@@ -205,6 +205,26 @@ pub(crate) fn rounded_rect_path(c: &Context, left_edge: f64, width: f64, radius:
     c.arc(left, cy_bot, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
     c.arc(left, cy_top, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
     c.close_path();
+}
+
+/// Round the whole display's corners: paint everything outside the bar-sized
+/// rounded rectangle of `radius` opaque black. Runs after a frame is fully
+/// composed so it wins over any background/button pixels painted there.
+pub(crate) fn mask_display_corners(surface: &Surface, width: i32, height: i32, radius: f64) {
+    let (w, h) = (width as f64, height as f64);
+    let radius = radius.clamp(0.0, (h / 2.0).min(w / 2.0));
+    if radius <= 0.0 {
+        return;
+    }
+    let c = Context::new(surface).unwrap();
+    // Same bar-space orientation as `Layer::draw`.
+    c.translate(h, 0.0);
+    c.rotate((90.0f64).to_radians());
+    c.set_source_rgb(0.0, 0.0, 0.0);
+    c.set_fill_rule(cairo::FillRule::EvenOdd);
+    c.rectangle(0.0, 0.0, w, h);
+    rounded_rect_path(&c, 0.0, w, radius, 0.0, h);
+    c.fill().unwrap();
 }
 
 /// The transport-control layout for a media panel: `(first_zone_left,

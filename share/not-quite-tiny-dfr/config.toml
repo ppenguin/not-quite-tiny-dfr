@@ -128,6 +128,7 @@
 # ButtonSpacing = 16
 # EdgePadding = 0
 # CornerRadius = 8
+# RoundDisplayCorners = false
 # FontSize = 32
 # LetterSpacing = 0
 # IconSize = 48
