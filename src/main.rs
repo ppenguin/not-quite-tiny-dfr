@@ -889,17 +889,75 @@ impl FunctionLayer {
         }
     }
 
+    /// Whether the window resting at slot unit `k` cuts a button: one of its
+    /// two edges falls strictly inside a stretched (multi-slot) button's span,
+    /// leaving that button partly scrolled off. An idle media widget doesn't
+    /// count: its transport row is three slot-aligned buttons, so an edge
+    /// between them cuts nothing -- it only becomes one merged panel (which
+    /// must stay whole) while a player is active.
+    fn window_cuts(&self, k: i64) -> bool {
+        let scroll_slots = (self.virtual_button_count - self.pinned_slots) as i64;
+        if scroll_slots <= 0 {
+            return false;
+        }
+        let media_merged = MEDIA_STATE.lock().unwrap().is_active();
+        let edges = [k, k + self.visible_slots as i64].map(|x| {
+            if self.scroll_loop {
+                x.rem_euclid(scroll_slots)
+            } else {
+                x
+            }
+        });
+        (self.pinned_count..self.buttons.len()).any(|i| {
+            if !media_merged && matches!(self.buttons[i].1.image, ButtonImage::Media(_)) {
+                return false;
+            }
+            let start = self.buttons[i].0 as i64 - self.pinned_slots as i64;
+            let end = if i + 1 < self.buttons.len() {
+                self.buttons[i + 1].0
+            } else {
+                self.virtual_button_count
+            } as i64
+                - self.pinned_slots as i64;
+            edges.iter().any(|&x| start < x && x < end)
+        })
+    }
+
     /// The offset the band should come to rest at, nearest to `offset`: the
-    /// nearest single-slot boundary. Stretched (multi-slot) widgets snap by slot
-    /// like everything else -- they are not kept whole in the window, so a wide
-    /// widget can come to rest partly scrolled off an edge rather than the band
-    /// jumping to keep it fully in view.
+    /// nearest single-slot boundary -- unless that leaves a stretched
+    /// (multi-slot) button cut off at an edge and moving one slot further,
+    /// either way, would show every button whole. Then it rests there instead;
+    /// when both directions work, whichever is closer to `offset` (where the
+    /// band was let go) wins. If no single-slot move helps, the nearest
+    /// boundary stands.
     fn snap_target(&self, geo: &ScrollGeometry, offset: f64) -> f64 {
-        let snapped = (offset / geo.pitch).round() * geo.pitch;
-        if self.scroll_loop {
-            snapped
+        let scroll_slots = self.virtual_button_count - self.pinned_slots;
+        let max_unit = scroll_slots.saturating_sub(self.visible_slots) as i64;
+        let in_range = |k: i64| self.scroll_loop || (0..=max_unit).contains(&k);
+        let unit = |k: i64| k as f64 * geo.pitch;
+        let nearest = (offset / geo.pitch).round() as i64;
+        let k = if self.scroll_loop {
+            nearest
         } else {
-            snapped.clamp(0.0, geo.max_offset)
+            nearest.clamp(0, max_unit)
+        };
+        if !self.window_cuts(k) {
+            return unit(k);
+        }
+        let fixes: Vec<i64> = [k - 1, k + 1]
+            .into_iter()
+            .filter(|&c| in_range(c) && !self.window_cuts(c))
+            .collect();
+        match fixes[..] {
+            [only] => unit(only),
+            [left, right] => {
+                if offset >= unit(k) {
+                    unit(right)
+                } else {
+                    unit(left)
+                }
+            }
+            _ => unit(k),
         }
     }
 
@@ -2352,26 +2410,29 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                 layer.scroll_snap = None;
             }
             if layer.scroll_velocity == 0.0 && layer.scroll_snap.is_none() {
-                // Safety net: a rubber-banding band must never REST stretched
-                // past an end. Whatever path left it overscrolled with nothing
-                // armed (a cancelled touch, a missed release), spring it back
-                // -- unless a finger on this layer is holding the stretch.
+                // Safety net: a band must never REST off its resting position
+                // -- stretched past an end, or between slot boundaries.
+                // Whatever path left it there with nothing armed (a cancelled
+                // touch, a tap that stopped a glide, a missed release, a
+                // relayout), glide it home -- unless a finger on this layer is
+                // holding it.
                 let finger_on_layer = touches.values().any(|t| match *t {
                     TouchState::Held { layer, .. }
                     | TouchState::Pending { layer, .. }
                     | TouchState::Scroll { layer, .. }
                     | TouchState::SliderDrag { layer, .. } => layer == i,
-                    // A layer swipe holds the slide, not any band stretch.
+                    // A layer swipe holds the slide, not the band.
                     TouchState::LayerSwipe { .. } => false,
                 });
-                if !layer.rubber_bands() || finger_on_layer {
+                if finger_on_layer {
                     continue;
                 }
                 let Some(geo) = layer.scroll_geometry(width as f64, &cfg.style) else {
                     continue;
                 };
-                if layer.scroll_offset < 0.0 || layer.scroll_offset > geo.max_offset {
-                    layer.scroll_snap = Some(layer.scroll_offset.clamp(0.0, geo.max_offset));
+                let target = layer.snap_target(&geo, layer.scroll_offset);
+                if (target - layer.scroll_offset).abs() > SNAP_EPSILON {
+                    layer.scroll_snap = Some(target);
                     // Step from the next frame: this tick's anim_dt spans the
                     // idle gap and would teleport the glide to its target.
                     scroll_animating = true;
@@ -4061,7 +4122,7 @@ mod tests {
     }
 
     #[test]
-    fn snap_by_slot_ignores_stretched_buttons() {
+    fn snap_keeps_stretched_buttons_whole_within_one_slot() {
         let style = Style::default();
         // Esc + 12 band buttons, one spanning two slots -> 13 band slots.
         // Band start slots: 0,1,2,3,4,5,6,8,... (the wide button covers 6-7).
@@ -4069,13 +4130,104 @@ mod tests {
         stretches[7] = 2; // overall button 7 = band button 6, slots 6-7
         let layer = stretched_layer(&stretches, 1, 6);
         let geo = layer.scroll_geometry(W as f64, &style).unwrap();
-        // Snapping is purely to the nearest slot boundary. Resting at slot 1
-        // puts the window's right edge through the wide button (slots 6-7); that
-        // is allowed now -- stretched buttons are not kept whole in the window.
-        assert!((layer.snap_target(&geo, 0.9 * geo.pitch) - geo.pitch).abs() < 1e-9);
-        assert!((layer.snap_target(&geo, 2.1 * geo.pitch) - 2.0 * geo.pitch).abs() < 1e-9);
-        // Even an offset inside the wide button snaps to the nearest slot.
-        assert!((layer.snap_target(&geo, 6.4 * geo.pitch) - 6.0 * geo.pitch).abs() < 1e-9);
+        let p = geo.pitch;
+        let snap = |o: f64| layer.snap_target(&geo, o * p) / p; // in slot units
+        // Resting at slot 1 would put the window's right edge (slot 7)
+        // through the wide button; both neighbours show it whole, so the side
+        // the band was let go on wins.
+        assert!(layer.window_cuts(1));
+        assert!(!layer.window_cuts(0) && !layer.window_cuts(2));
+        assert!((snap(0.9) - 0.0).abs() < 1e-9);
+        assert!((snap(1.1) - 2.0).abs() < 1e-9);
+        // Nothing cut: the nearest boundary stands.
+        assert!((snap(2.1) - 2.0).abs() < 1e-9);
+        // Window [6, 12): the wide button is fully inside, nothing cut.
+        assert!((snap(6.4) - 6.0).abs() < 1e-9);
+        // A resting position is a fixed point: it never re-snaps elsewhere.
+        for k in 0..13 {
+            let t = snap(k as f64);
+            assert!((snap(t) - t).abs() < 1e-9, "unit {k} -> {t} is not a fixed point");
+        }
+    }
+
+    #[test]
+    fn media_widget_counts_as_merged_only_while_active() {
+        let style = Style::default();
+        // Esc + a 3-wide media widget on band slots 2-4, singles elsewhere.
+        let keys: Vec<ButtonConfig> = (0..12)
+            .map(|i| ButtonConfig {
+                text: (i != 3).then(|| format!("B{i}")),
+                media: (i == 3).then_some(true),
+                stretch: Some(if i == 3 { 3 } else { 1 }),
+                pinned: (i == 0).then_some(true),
+                ..Default::default()
+            })
+            .collect();
+        let layer = FunctionLayer::with_config(keys, &mut Widgets::default(), &mut 0, 48, 6, false, true, true, true);
+        let geo = layer.scroll_geometry(W as f64, &style).unwrap();
+        let p = geo.pitch;
+        // Idle: the transport row splits on slot boundaries, so window [3, 9)
+        // (edge through the widget) is fine and 3 is a resting position.
+        MEDIA_STATE.lock().unwrap().status = media::MediaStatus::Idle;
+        assert!(!layer.window_cuts(3));
+        assert!((layer.snap_target(&geo, 3.0 * p) / p - 3.0).abs() < 1e-9);
+        // Playing: the same window now cuts the merged panel, and the resting
+        // position at 3 is no longer a fixed point -- the idle safety net
+        // moves the band one slot so the panel shows whole.
+        MEDIA_STATE.lock().unwrap().status = media::MediaStatus::Playing;
+        assert!(layer.window_cuts(3) && layer.window_cuts(4));
+        assert!(!layer.window_cuts(2) && !layer.window_cuts(5));
+        assert!((layer.snap_target(&geo, 3.0 * p) / p - 2.0).abs() < 1e-9);
+        assert!((layer.snap_target(&geo, 3.9 * p) / p - 5.0).abs() < 1e-9);
+        MEDIA_STATE.lock().unwrap().status = media::MediaStatus::Idle;
+    }
+
+    #[test]
+    fn snap_prefers_the_only_direction_that_uncuts() {
+        let style = Style::default();
+        // Two wide buttons: band slots 6-7 and 8-9 (buttons 7 and 8).
+        let mut stretches = vec![1usize; 13];
+        stretches[7] = 2;
+        stretches[8] = 2;
+        let layer = stretched_layer(&stretches, 1, 6);
+        let geo = layer.scroll_geometry(W as f64, &style).unwrap();
+        let p = geo.pitch;
+        // 14 band slots, 6 visible. Window [7, 13) starts inside the first
+        // wide button (cut); [6, 12) and [8, 14) are both clean.
+        assert!(layer.window_cuts(7) && layer.window_cuts(9));
+        assert!(!layer.window_cuts(6) && !layer.window_cuts(8));
+        // From 8.4 the nearest is 8 ([8, 14)): clean, stands.
+        assert!((layer.snap_target(&geo, 8.4 * p) / p - 8.0).abs() < 1e-9);
+        // From 6.6 the nearest is 7 (cut); 6 and 8 both clean -> the closer.
+        assert!((layer.snap_target(&geo, 6.6 * p) / p - 6.0).abs() < 1e-9);
+        assert!((layer.snap_target(&geo, 7.4 * p) / p - 8.0).abs() < 1e-9);
+
+        // Non-looping: the ends bound the candidates. 13 band slots, 6 visible
+        // -> units 0..=7. Wide buttons on slots 4-5 and 11-12: unit 6
+        // ([6, 12)) cuts the second, unit 5 ([5, 11)) the first, and 7
+        // ([7, 13)) is the only clean neighbour.
+        let mut stretches = vec![1usize; 12];
+        stretches[5] = 2; // slots 4-5
+        stretches[11] = 2; // slots 11-12
+        let keys: Vec<ButtonConfig> = stretches
+            .iter()
+            .enumerate()
+            .map(|(i, s)| ButtonConfig {
+                text: Some(format!("B{i}")),
+                pinned: (i == 0).then_some(true),
+                stretch: Some(*s),
+                ..Default::default()
+            })
+            .collect();
+        let layer = FunctionLayer::with_config(keys, &mut Widgets::default(), &mut 0, 48, 6, false, true, true, true);
+        let geo = layer.scroll_geometry(W as f64, &style).unwrap();
+        let p = geo.pitch;
+        assert!(layer.window_cuts(6) && layer.window_cuts(5) && !layer.window_cuts(7));
+        // Either side of 6, only 7 uncuts everything.
+        assert!((layer.snap_target(&geo, 5.6 * p) / p - 7.0).abs() < 1e-9);
+        assert!((layer.snap_target(&geo, 6.4 * p) / p - 7.0).abs() < 1e-9);
+        // Past the end, the candidates stay in range.
+        assert!((layer.snap_target(&geo, 9.0 * p) / p - 7.0).abs() < 1e-9);
     }
 
     #[test]
