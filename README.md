@@ -123,7 +123,7 @@ Colors are hex strings: `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `Background` | color | `#000000` | Bar background color. |
-| `BackgroundImage` | string | unset | PNG background, scaled/center-cropped to the bar (`cover`). Absolute path, or relative to the config dirs. Whichever of `Background`/`BackgroundImage` is declared **later** wins. |
+| `BackgroundImage` | string | unset | Background image (PNG, JPEG, or WebP; the format is detected from the file contents, not the extension), scaled/center-cropped to the bar (`cover`). Absolute path, or relative to the config dirs. Whichever of `Background`/`BackgroundImage` is declared **later** wins. |
 | `BackgroundImageBlur` | bool | `false` | Blur the background image (applied once when it's loaded). |
 | `ButtonColor` | color | `#333333` | Idle button fill. Setting it explicitly draws the fill even with `ShowButtonOutlines = false`, so buttons can be tinted over a background image. |
 | `ButtonColorActive` | color | `#666666` | Pressed button fill. |

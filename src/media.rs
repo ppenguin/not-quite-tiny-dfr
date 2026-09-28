@@ -1158,7 +1158,18 @@ fn load_art(url: &str) -> Option<MediaArt> {
 /// `ART_MAX`.
 fn decode_art(bytes: &[u8]) -> Option<MediaArt> {
     let img = image::load_from_memory(bytes).ok()?.thumbnail(ART_MAX, ART_MAX);
-    let rgba = img.to_rgba8();
+    let (width, height, stride, data) = rgba_to_argb32(&img.to_rgba8())?;
+    Some(MediaArt {
+        width,
+        height,
+        stride,
+        data,
+    })
+}
+
+/// Convert a decoded RGBA image into a cairo ARGB32 pixel buffer, returning
+/// `(width, height, stride, data)`; `None` for an empty image.
+pub(crate) fn rgba_to_argb32(rgba: &image::RgbaImage) -> Option<(i32, i32, i32, Vec<u8>)> {
     let (w, h) = (rgba.width() as i32, rgba.height() as i32);
     if w == 0 || h == 0 {
         return None;
@@ -1175,12 +1186,7 @@ fn decode_art(bytes: &[u8]) -> Option<MediaArt> {
         data[off + 2] = (r as u32 * a32 / 255) as u8;
         data[off + 3] = a;
     }
-    Some(MediaArt {
-        width: w,
-        height: h,
-        stride,
-        data,
-    })
+    Some((w, h, stride, data))
 }
 
 /// Fetch an http(s) art URL into memory with curl, bounded in time and size so

@@ -14,7 +14,7 @@ use serde::{
 use std::{
     ffi::OsString,
     fmt,
-    fs::{read_to_string, File},
+    fs::read_to_string,
     io::ErrorKind,
     os::fd::AsFd,
     path::{Path, PathBuf},
@@ -534,13 +534,8 @@ fn load_background_image(
     let width = width + crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX as i32;
     let height = height + crate::pixel_shift::PIXEL_SHIFT_HEIGHT_PX as i32;
     let resolved = resolve_image_path(path).ok_or_else(|| format!("not found: {path}"))?;
-    let mut file = File::open(&resolved).map_err(|e| e.to_string())?;
-    let src =
-        ImageSurface::create_from_png(&mut file).map_err(|e| format!("not a readable PNG: {e}"))?;
+    let src = load_image_surface(&resolved)?;
     let (iw, ih) = (src.width() as f64, src.height() as f64);
-    if iw <= 0.0 || ih <= 0.0 {
-        return Err("image has zero size".to_string());
-    }
     let scale = (width as f64 / iw).max(height as f64 / ih); // cover
     let mut dst = ImageSurface::create(Format::ARgb32, width, height).map_err(|e| e.to_string())?;
     let c = Context::new(&dst).map_err(|e| e.to_string())?;
@@ -564,6 +559,17 @@ fn load_background_image(
         crate::box_blur_argb32(&mut data, w, h, stride, radius);
     }
     Ok(dst)
+}
+
+/// Decode an image file (PNG, JPEG, WebP, ...) into a cairo surface. The
+/// format is sniffed from the file contents rather than the extension, so a
+/// JPEG saved as `.png` still loads.
+fn load_image_surface(path: &Path) -> Result<ImageSurface, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("cannot decode image: {e}"))?;
+    let (w, h, stride, data) = crate::media::rgba_to_argb32(&img.to_rgba8())
+        .ok_or_else(|| "image has zero size".to_string())?;
+    ImageSurface::create_for_data(data, Format::ARgb32, w, h, stride).map_err(|e| e.to_string())
 }
 
 /// Slots covered by a layer's declared pinned prefix (the leading run of
