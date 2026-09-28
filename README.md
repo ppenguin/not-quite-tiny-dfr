@@ -134,10 +134,13 @@ Colors are hex strings: `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`.
 | `EdgePadding` | number | `0` | Padding between the screen edges and the first/last button, in px. |
 | `CornerRadius` | number | `8` | Button corner radius in px. |
 | `FontSize` | number | `32` | Label font size in px. |
+| `LetterSpacing` | number | `0` | Extra spacing between glyphs in px; negative tightens. Pango ignores a font's own tracking table, so this is how to recover e.g. SF Pro's tighter display-size spacing. |
 | `IconSize` | number | `48` | Default icon size in px (per-button `IconWidth`/`IconHeight` override it). |
 | `HeightPercent` | number | `90` | Button height as a percentage (0–100) of the bar height. |
 | `BatteryChargingColor` | color | `#00b300` | Battery indicator color while charging. |
 | `BatteryLowColor` | color | `#b30000` | Battery indicator color when low. |
+
+Text is rasterized with grayscale antialiasing, slight (vertical-only) hinting, and fractional horizontal glyph positions, the same combination Qt uses with fontconfig's default `hintslight`, so stems stay crisp and letter spacing stays even at label sizes.
 
 ## Custom widgets
 

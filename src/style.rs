@@ -158,6 +158,9 @@ pub struct Style {
     pub edge_padding: f64,
     pub corner_radius: f64,
     pub font_size: f64,
+    /// Extra spacing between glyphs in px (negative tightens). Applied to every
+    /// text layout; useful for fonts whose native tracking pango doesn't apply.
+    pub letter_spacing: f64,
     /// Default icon size in px for buttons that don't set IconWidth/IconHeight.
     pub icon_size: f64,
     /// Vertical extent of buttons as a percentage (0..=100) of the bar height.
@@ -181,6 +184,7 @@ impl Default for Style {
             edge_padding: 0.0,
             corner_radius: 8.0,
             font_size: 32.0,
+            letter_spacing: 0.0,
             icon_size: 48.0,
             height_percent: 90.0,
             battery_charging_color: Color::rgb(0.0, 0.7, 0.0),
@@ -209,6 +213,7 @@ pub struct StyleProxy {
     pub edge_padding: Option<f64>,
     pub corner_radius: Option<f64>,
     pub font_size: Option<f64>,
+    pub letter_spacing: Option<f64>,
     pub icon_size: Option<f64>,
     pub height_percent: Option<f64>,
     pub battery_charging_color: Option<Color>,
@@ -249,6 +254,7 @@ impl<'de> Deserialize<'de> for StyleProxy {
                         "EdgePadding" => s.edge_padding = Some(map.next_value()?),
                         "CornerRadius" => s.corner_radius = Some(map.next_value()?),
                         "FontSize" => s.font_size = Some(map.next_value()?),
+                        "LetterSpacing" => s.letter_spacing = Some(map.next_value()?),
                         "IconSize" => s.icon_size = Some(map.next_value()?),
                         "HeightPercent" => s.height_percent = Some(map.next_value()?),
                         "BatteryChargingColor" => {
@@ -288,6 +294,7 @@ impl StyleProxy {
         self.edge_padding = user.edge_padding.or(self.edge_padding);
         self.corner_radius = user.corner_radius.or(self.corner_radius);
         self.font_size = user.font_size.or(self.font_size);
+        self.letter_spacing = user.letter_spacing.or(self.letter_spacing);
         self.icon_size = user.icon_size.or(self.icon_size);
         self.height_percent = user.height_percent.or(self.height_percent);
         self.battery_charging_color = user.battery_charging_color.or(self.battery_charging_color);
@@ -313,6 +320,7 @@ impl StyleProxy {
             edge_padding: self.edge_padding.unwrap_or(d.edge_padding).max(0.0),
             corner_radius: self.corner_radius.unwrap_or(d.corner_radius),
             font_size: self.font_size.unwrap_or(d.font_size),
+            letter_spacing: self.letter_spacing.unwrap_or(d.letter_spacing),
             icon_size: self.icon_size.unwrap_or(d.icon_size).max(0.0),
             height_percent: self
                 .height_percent

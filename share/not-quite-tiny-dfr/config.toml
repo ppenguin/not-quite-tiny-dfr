@@ -129,6 +129,7 @@
 # EdgePadding = 0
 # CornerRadius = 8
 # FontSize = 32
+# LetterSpacing = 0
 # IconSize = 48
 # HeightPercent = 90
 # BatteryChargingColor = "#00b300"

@@ -133,10 +133,44 @@ pub(crate) fn capsule(c: &Context, x: f64, y: f64, w: f64, h: f64) {
 /// Lay `text` out in the bar font. Pango shapes with per-glyph font fallback
 /// (and color emoji), which the cairo toy API's single font face could not.
 pub(crate) fn text_layout(c: &Context, style: &style::Style, text: &str) -> pango::Layout {
-    let layout = pangocairo::functions::create_layout(c);
+    let layout = new_layout(c);
     layout.set_font_description(Some(&style.font));
     layout.set_text(text);
+    apply_letter_spacing(&layout, style);
     layout
+}
+
+/// Create a pango layout on `c` with the bar's text rasterization settings:
+/// grayscale antialiasing, slight (vertical-only) hinting so baselines and
+/// x-heights snap to pixel rows, unhinted metrics, and fractional (sub-pixel)
+/// horizontal glyph positions. The pango/cairo defaults snap every glyph
+/// advance to whole device pixels, which at label sizes gives visibly uneven,
+/// loose letter spacing; this combination matches how Qt (the quickshell
+/// bar) renders with fontconfig's default `hintslight`.
+pub(crate) fn new_layout(c: &Context) -> pango::Layout {
+    let layout = pangocairo::functions::create_layout(c);
+    let ctx = layout.context();
+    if let Ok(mut opts) = cairo::FontOptions::new() {
+        opts.set_antialias(cairo::Antialias::Gray);
+        opts.set_hint_style(cairo::HintStyle::Slight);
+        opts.set_hint_metrics(cairo::HintMetrics::Off);
+        pangocairo::functions::context_set_font_options(&ctx, Some(&opts));
+    }
+    ctx.set_round_glyph_positions(false);
+    layout.context_changed();
+    layout
+}
+
+/// Apply the style's `LetterSpacing` (px) to `layout` as a pango attribute.
+/// No-op at the default of 0 so unconfigured bars keep pango's native advance.
+pub(crate) fn apply_letter_spacing(layout: &pango::Layout, style: &style::Style) {
+    if style.letter_spacing != 0.0 {
+        let attrs = pango::AttrList::new();
+        attrs.insert(pango::AttrInt::new_letter_spacing(
+            (style.letter_spacing * pango::SCALE as f64).round() as i32,
+        ));
+        layout.set_attributes(Some(&attrs));
+    }
 }
 
 /// Draw `layout` horizontally centered in the button and vertically centered
@@ -458,7 +492,7 @@ pub(crate) fn draw_media_text(
 ) {
     let avail = (top - bot - MEDIA_TEXT_VPAD * 2.0).max(1.0);
     let make = |text: &str, px: f64, bold: bool| {
-        let layout = pangocairo::functions::create_layout(c);
+        let layout = new_layout(c);
         let mut font = style.font.clone();
         font.set_absolute_size(px * pango::SCALE as f64);
         // The title is emboldened; the artist line keeps the configured
@@ -468,6 +502,7 @@ pub(crate) fn draw_media_text(
         }
         layout.set_font_description(Some(&font));
         layout.set_text(text);
+        apply_letter_spacing(&layout, style);
         layout.set_ellipsize(pango::EllipsizeMode::End);
         layout.set_width((width * pango::SCALE as f64) as i32);
         layout
@@ -519,9 +554,10 @@ pub(crate) fn draw_media_lyrics(
         if text.is_empty() || alpha <= 0.0 {
             return;
         }
-        let layout = pangocairo::functions::create_layout(c);
+        let layout = new_layout(c);
         let mut font = style.font.clone();
         layout.set_text(text);
+        apply_letter_spacing(&layout, style);
         let max_px = (band * 0.62).max(1.0);
         let min_px = band * 0.34;
         font.set_absolute_size(max_px * pango::SCALE as f64);
