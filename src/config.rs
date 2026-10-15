@@ -209,9 +209,9 @@ pub enum ButtonAction {
 /// `Action` (the default) runs the button's configured Action/keys; `Expand`
 /// instead expands the button in place -- reusing the slider's expand
 /// animation -- and shows an `ExpandCommand` script's output until it idles.
-/// Any other string is a shell command: on a media widget it runs when the
-/// active panel is tapped outside the transport controls (e.g. to raise the
-/// player app).
+/// Any other string is a shell command, run when the button is pressed; on a
+/// media widget it runs when the active panel is tapped outside the transport
+/// controls (e.g. to raise the player app).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OnClick {
     Action,

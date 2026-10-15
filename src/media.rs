@@ -96,7 +96,7 @@ pub fn control(verb: &str) {
     let _ = Command::new("playerctl").arg(verb).status();
 }
 
-/// Run the media widget's OnClick shell command, fire-and-forget. A thread
+/// Run a button's OnClick shell command, fire-and-forget. A thread
 /// waits on the child (reaping it) so an arbitrary command can't stall the
 /// render loop.
 pub fn run_tap_command(command: &str) {

@@ -3,7 +3,7 @@
 //! tap-to-expand state, and image loading. `FunctionLayer` (in main) lays these
 //! out and drives their draw; the media panel itself lives in `render`.
 
-use crate::config::{ButtonAction, ButtonConfig};
+use crate::config::{ButtonAction, ButtonConfig, OnClick};
 use crate::render::{capsule, show_layout_centered, text_layout, MediaState};
 use crate::sensors::{
     find_battery_device, BatteryState, BATTERY_STATE, CPU_POWER_STATE, CPU_TEMP_STATE, GPU_LABEL,
@@ -288,6 +288,8 @@ pub(crate) struct Button {
     /// Whether tapping shows the pressed (active) fill. Only buttons that
     /// declare an `OnClick` light up on tap; others stay flat.
     pub(crate) highlight_on_tap: bool,
+    /// `OnClick` shell command, run when the button is pressed.
+    pub(crate) tap_command: Option<String>,
 }
 
 /// The track region of a slider button, given the button's on-screen rect:
@@ -489,6 +491,9 @@ impl Button {
         button.bg_color = bg_color;
         button.bg_color_active = bg_color_active;
         button.text_color = text_color;
+        if let Some(OnClick::Command(c)) = cfg.on_click {
+            button.tap_command = Some(c);
+        }
         button
     }
     pub(crate) fn new_spacer() -> Button {
@@ -503,6 +508,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
     pub(crate) fn new_text(text: String, action: Vec<ButtonAction>) -> Button {
@@ -517,6 +523,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
     pub(crate) fn new_command(
@@ -544,6 +551,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
     pub(crate) fn new_icon(
@@ -566,6 +574,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
     pub(crate) fn load_battery_image(icon: &str, theme: Option<impl AsRef<str>>) -> CachedSvg {
@@ -631,6 +640,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
 
@@ -668,6 +678,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
 
@@ -703,6 +714,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
 
@@ -737,6 +749,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
 
@@ -771,6 +784,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
 
@@ -802,6 +816,7 @@ impl Button {
             bg_color_active: None,
             text_color: None,
             highlight_on_tap: false,
+            tap_command: None,
         }
     }
     pub(crate) fn needs_faster_refresh(&self) -> bool {
@@ -1109,6 +1124,9 @@ impl Button {
             self.changed = true;
 
             toggle_keys(uinput, &self.action, active as i32);
+            if active {
+                self.run_tap_command();
+            }
         }
     }
     /// Set only the pressed look (no key events). Used while a touch on a
@@ -1126,6 +1144,14 @@ impl Button {
         F: AsRawFd,
     {
         toggle_keys(uinput, &self.action, pressed as i32);
+        if pressed {
+            self.run_tap_command();
+        }
+    }
+    fn run_tap_command(&self) {
+        if let Some(c) = &self.tap_command {
+            crate::media::run_tap_command(c);
+        }
     }
     /// Resolve the fill color for this button's rounded rectangle, or `None`
     /// if it should not be drawn (outlines disabled and button is inactive).

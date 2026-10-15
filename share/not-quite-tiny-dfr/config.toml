@@ -79,7 +79,7 @@
 
 # Layers = [
 #     [ { Text = "esc", Action = "Esc", Pinned = true, OnClick = "Action" }, { Text = "F1", Action = "F1", OnClick = "Action" }, { Text = "F2", Action = "F2", OnClick = "Action" } ],
-#     [ { Text = "esc", Action = "Esc", Pinned = true, OnClick = "Action" }, { Icon = "play_pause", Action = "PlayPause", OnClick = "Action" } ],
+#     [ { Text = "esc", Action = "Esc", Pinned = true, OnClick = "Action" }, { Icon = "play_pause", Action = "PlayPause", OnClick = "Action" }, { Icon = "sleep", OnClick = "systemd-run --user --collect systemctl suspend" } ],
 #     [ { Text = "esc", Action = "Esc", Pinned = true, OnClick = "Action" }, { Time = "%H:%M" }, { Cpu = "celsius watts", Stretch = 2 } ],
 #     [ { Text = "esc", Action = "Esc", Pinned = true, OnClick = "Action" }, { Gpu = "celsius watts", Stretch = 2 } ],
 # ]
