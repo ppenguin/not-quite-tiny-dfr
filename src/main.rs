@@ -2040,6 +2040,8 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
         .unwrap()
         .match_subsystem("power_supply")
         .unwrap()
+        .match_subsystem("drm")
+        .unwrap()
         .listen()
         .unwrap();
     let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
@@ -2898,7 +2900,19 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
             e => e.unwrap(),
         };
 
-        _ = udev_monitor.iter().last();
+        // Resume re-registers the Touch Bar's DRM card. Check on the udev
+        // event rather than on the next flush, which can be seconds away
+        // (heartbeat), so systemd restarts us on the new card right away.
+        let drm_changed = udev_monitor
+            .iter()
+            .fold(false, |seen, ev| seen || ev.subsystem().is_some_and(|s| s == "drm"));
+        if drm_changed {
+            if let Err(err) = drm.fb_info() {
+                if display::is_device_gone(&err) {
+                    exit_device_gone(&err);
+                }
+            }
+        }
 
         // Clear the frame timer if it fired (nonblocking; harmless otherwise).
         let mut timer_buf = [0u8; 8];
