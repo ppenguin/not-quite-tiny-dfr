@@ -214,6 +214,14 @@ const FLUSH_STALL_MAX_DOUBLINGS: u32 = 4;
 /// band (measured near-zero stalls under ~200 ms) rather than at the ~700 ms
 /// cliff, for margin; can be relaxed once it is confirmed on hardware.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(150);
+/// Heartbeat period once the bar has gone untouched for HEARTBEAT_ACTIVE_WINDOW.
+/// Each poke is a USB round trip through the T2 that keeps the CPU package out
+/// of deep idle, so an idle bar pokes less often -- but still inside the
+/// measured ~700 ms cold cliff, so the first flush of a new touch stays warm.
+const HEARTBEAT_IDLE_INTERVAL: Duration = Duration::from_millis(500);
+/// How long after the last touch (or Fn press) the bar counts as in use and
+/// keeps the fast heartbeat.
+const HEARTBEAT_ACTIVE_WINDOW: Duration = Duration::from_secs(10);
 /// Time constant of the post-scroll snap glide (to the nearest slot boundary).
 const SNAP_TAU: f64 = 0.08;
 /// The snap glide is finished once within this many px of its target.
@@ -1850,6 +1858,8 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
     // When the display was last actually flushed (any real dirty, including a
     // keep-warm heartbeat). Drives HEARTBEAT_INTERVAL so the T2 never goes cold.
     let mut last_flush = Instant::now();
+    // Last touch on the bar (or Fn press): picks the fast or idle heartbeat.
+    let mut last_activity = Instant::now();
     // Consecutive stalled flushes (see the cool-down at the flush site).
     let mut flush_stalls: u32 = 0;
     // NQTD_FRAME_LOG=1 prints per-frame timings to the journal, for chasing
@@ -2864,8 +2874,13 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
         // stalls ~1 s, so poking merely feeds it; the stream needs quiet to
         // resync. When frames are actually flushing (animation) last_flush stays
         // fresh so the heartbeat self-suppresses. Wake is capped to the interval.
+        let heartbeat = if last_activity.elapsed() < HEARTBEAT_ACTIVE_WINDOW {
+            HEARTBEAT_INTERVAL
+        } else {
+            HEARTBEAT_IDLE_INTERVAL
+        };
         if backlight.current_bl() > 0 && !frame_pending && Instant::now() >= next_frame {
-            if last_flush.elapsed() >= HEARTBEAT_INTERVAL {
+            if last_flush.elapsed() >= heartbeat {
                 let t0 = Instant::now();
                 if let Err(err) = drm.dirty(&[ClipRect::new(0, 0, 1, 1)]) {
                     if display::is_device_gone(&err) {
@@ -2888,7 +2903,7 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                     );
                 }
             }
-            let until = HEARTBEAT_INTERVAL.saturating_sub(last_flush.elapsed());
+            let until = heartbeat.saturating_sub(last_flush.elapsed());
             next_timeout_ms = min(next_timeout_ms, until.as_millis().max(1) as i32);
         }
 
@@ -2939,6 +2954,7 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                     // Fn peeks at the next layer; with a single layer there is
                     // nothing to peek at (or swap to).
                     if key.key() == Key::Fn as u32 && layers.len() > 1 {
+                        last_activity = Instant::now();
                         if cfg.double_press_switch_layers > 0
                             && key.key_state() == KeyState::Pressed
                         {
@@ -2963,6 +2979,7 @@ fn real_main(drm: &mut DrmBackend, uinput: &mut UInputHandle<File>) {
                     if Some(te.device()) != digitizer || backlight.current_bl() == 0 {
                         continue;
                     }
+                    last_activity = Instant::now();
                     match te {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);

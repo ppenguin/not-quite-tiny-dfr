@@ -14,18 +14,25 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use cairo::Format;
 use serde_json::Value;
 
-/// How often the poller re-queries playerctl metadata.
+/// How often the poller re-queries playerctl metadata while something plays.
 const POLL: Duration = Duration::from_millis(700);
+/// ... and while nothing plays. Each query spawns up to three `playerctl`
+/// processes that wake every MPRIS player, so an idle poller backs off; a
+/// Touch Bar media control re-polls at once (see `METADATA_POKE`).
+const POLL_IDLE: Duration = Duration::from_secs(2);
 /// How often the poller re-derives the current lyric line (cheap arithmetic
 /// off the metadata cadence, so the highlighted line tracks the song closely).
 const LYRIC_TICK: Duration = Duration::from_millis(100);
+/// Lyric-sync wait while paused/idle, where the position does not advance. Any
+/// re-anchor from the metadata thread ends the wait early.
+const LYRIC_IDLE: Duration = Duration::from_secs(1);
 /// How long a lyric gap must last (in playback seconds) before the widget
 /// switches from the lyrics to the controls/title. Short gaps between lines
 /// would otherwise flap the view; only a real break (intro / instrumental)
@@ -94,7 +101,40 @@ pub static MEDIA_STATE: Mutex<MediaInfo> = Mutex::new(MediaInfo {
 /// active player, ignoring failure (there may be no player).
 pub fn control(verb: &str) {
     let _ = Command::new("playerctl").arg(verb).status();
+    METADATA_POKE.poke();
 }
+
+/// An interruptible sleep: `wait` returns after `timeout`, or as soon as
+/// another thread calls `poke`.
+struct Poke {
+    flag: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Poke {
+    const fn new() -> Self {
+        Poke {
+            flag: Mutex::new(false),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn poke(&self) {
+        *self.flag.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration) {
+        let flag = self.flag.lock().unwrap();
+        let (mut flag, _) = self.cv.wait_timeout_while(flag, timeout, |f| !*f).unwrap();
+        *flag = false;
+    }
+}
+
+/// Wakes the metadata thread early (after a media control).
+static METADATA_POKE: Poke = Poke::new();
+/// Wakes the lyric-sync thread early (after a re-anchor).
+static LYRIC_POKE: Poke = Poke::new();
 
 /// Run a button's OnClick shell command, fire-and-forget. A thread
 /// waits on the child (reaping it) so an arbitrary command can't stall the
@@ -869,6 +909,7 @@ fn spawn_metadata_thread(wake: Arc<OwnedFd>) {
                 Instant::now(),
                 status == MediaStatus::Playing,
             ));
+            LYRIC_POKE.poke();
             // On a real-track change, (re)fetch lyrics.
             let real = status != MediaStatus::Idle && !track.title.is_empty();
             let track_key = if real {
@@ -904,7 +945,11 @@ fn spawn_metadata_thread(wake: Arc<OwnedFd>) {
                     );
                 }
             }
-            thread::sleep(POLL);
+            METADATA_POKE.wait(if status == MediaStatus::Playing {
+                POLL
+            } else {
+                POLL_IDLE
+            });
         }
     });
 }
@@ -976,7 +1021,12 @@ fn spawn_lyric_sync_thread(wake: Arc<OwnedFd>) {
                     gap_start = None;
                 }
             }
-            thread::sleep(LYRIC_TICK);
+            let playing = matches!(*ANCHOR.lock().unwrap(), Some((_, _, true)));
+            if playing {
+                thread::sleep(LYRIC_TICK);
+            } else {
+                LYRIC_POKE.wait(LYRIC_IDLE);
+            }
         }
     });
 }
