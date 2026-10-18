@@ -62,14 +62,16 @@ prop() {
 # monitor`). We read a single line through a fifo -- not a pipe straight to
 # gdbus -- because the shell waits for every process in a pipeline, which would
 # make us sit out the whole monitor instead of leaving the instant a signal
-# lands; so we read one line, then stop the monitor ourselves.
+# lands; so we read up to the first signal, then stop the monitor ourselves.
+# gdbus prints a "Monitoring signals on object ..." banner as soon as it
+# connects, so match the signal itself, not just the first line.
 wait_change() {
     command -v gdbus >/dev/null 2>&1 || { sleep "$backstop"; return; }
     fifo=$(mktemp -u) && mkfifo "$fifo" 2>/dev/null || { sleep "$backstop"; return; }
     gdbus monitor --system --dest org.freedesktop.UPower \
         --object-path "$path" >"$fifo" 2>/dev/null &
     gd=$!
-    timeout "$backstop" head -n 1 "$fifo" >/dev/null 2>&1
+    timeout "$backstop" grep -m 1 -q PropertiesChanged "$fifo" >/dev/null 2>&1
     kill "$gd" 2>/dev/null
     wait "$gd" 2>/dev/null
     rm -f "$fifo"
