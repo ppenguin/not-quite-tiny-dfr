@@ -1105,12 +1105,16 @@ impl FunctionLayer {
                     } else {
                         None
                     };
-                    Button::new_command(
+                    let mut button = Button::new_command(
                         id,
                         std::mem::take(&mut cfg.action),
                         cfg.theme.take(),
                         expand,
-                    )
+                    );
+                    if let Some(OnClick::Command(c)) = cfg.on_click.take() {
+                        button.tap_command = Some(c);
+                    }
+                    button
                 } else {
                     Button::with_config(cfg, default_icon_size)
                 };
