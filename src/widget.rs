@@ -62,6 +62,31 @@ impl Signal {
     }
 }
 
+/// Each widget worker's refresh signal, by widget id, so a tap can re-run a
+/// command widget instead of waiting out its interval. Replaced by every new
+/// runtime; a stale entry can only poke a thread that is already stopping.
+static REFRESH: Mutex<Vec<(usize, Arc<Signal>)>> = Mutex::new(Vec::new());
+
+/// Run a command widget's OnClick command off the render path, then re-run
+/// the widget's own command so its output follows the tap at once.
+pub fn run_tap_command(command: &str, id: usize) {
+    let command = command.to_string();
+    thread::spawn(move || {
+        if let Err(e) = Command::new("sh").arg("-c").arg(&command).status() {
+            eprintln!("not-quite-tiny-dfr: failed to run OnClick command {command:?}: {e}");
+        }
+        let refresh = REFRESH
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, s)| s.clone());
+        if let Some(refresh) = refresh {
+            refresh.set();
+        }
+    });
+}
+
 /// How long after a slider set to distrust polled get results: a poll that
 /// STARTED before the set can finish after it carrying the pre-set value,
 /// and applying it would snap the slider's fill backwards.
@@ -153,6 +178,9 @@ pub struct WidgetRuntime {
     mute_commands: HashMap<usize, String>,
     /// When each slider was last set or (un)muted, for the SET_QUIET window.
     last_set: Arc<Mutex<HashMap<usize, Instant>>>,
+    /// Every worker's refresh signal, set on drop so sleeping workers see the
+    /// stop flag at once.
+    refresh: Vec<Arc<Signal>>,
 }
 
 impl WidgetRuntime {
@@ -164,11 +192,14 @@ impl WidgetRuntime {
             Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(Signal::default());
         let setter_wake = Arc::new(Signal::default());
+        let mut refresh_by_id = Vec::new();
         for spec in widgets.commands {
             let results = results.clone();
             let stop = stop.clone();
             let wake = wake.clone();
-            thread::spawn(move || run_widget(spec, results, stop, wake));
+            let refresh = Arc::new(Signal::default());
+            refresh_by_id.push((spec.id, refresh.clone()));
+            thread::spawn(move || run_widget(spec, results, stop, refresh, wake));
         }
         // Sliders poll their get command through the same worker path.
         let mut set_commands = HashMap::new();
@@ -182,8 +213,12 @@ impl WidgetRuntime {
             let results = results.clone();
             let stop = stop.clone();
             let wake = wake.clone();
-            thread::spawn(move || run_widget(poll, results, stop, wake));
+            let refresh = Arc::new(Signal::default());
+            refresh_by_id.push((poll.id, refresh.clone()));
+            thread::spawn(move || run_widget(poll, results, stop, refresh, wake));
         }
+        let refresh = refresh_by_id.iter().map(|(_, s)| s.clone()).collect();
+        *REFRESH.lock().unwrap() = refresh_by_id;
         let pending_sets: Arc<Mutex<HashMap<usize, i32>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending_mutes: Arc<Mutex<HashMap<usize, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -217,6 +252,7 @@ impl WidgetRuntime {
             pending_mutes,
             mute_commands,
             last_set: Arc::new(Mutex::new(HashMap::new())),
+            refresh,
         }
     }
 
@@ -338,6 +374,9 @@ impl Drop for WidgetRuntime {
     fn drop(&mut self) {
         self.stop.set();
         self.setter_wake.set();
+        for refresh in &self.refresh {
+            refresh.set();
+        }
     }
 }
 
@@ -345,6 +384,7 @@ fn run_widget(
     spec: WidgetSpec,
     results: Arc<Mutex<HashMap<usize, WidgetOutput>>>,
     stop: Arc<Signal>,
+    refresh: Arc<Signal>,
     wake: Arc<OwnedFd>,
 ) {
     let mut retry = RETRY_BASE;
@@ -374,8 +414,8 @@ fn run_widget(
             retry = (retry * 2).min(spec.interval.max(RETRY_BASE));
             delay
         };
-        // Returns early if the runtime stops.
-        stop.wait(delay);
+        // Returns early on a tap refresh or when the runtime stops.
+        refresh.take(delay);
     }
 }
 

@@ -1150,7 +1150,10 @@ impl Button {
     }
     fn run_tap_command(&self) {
         if let Some(c) = &self.tap_command {
-            crate::media::run_tap_command(c);
+            match &self.image {
+                ButtonImage::Command { id, .. } => crate::widget::run_tap_command(c, *id),
+                _ => crate::media::run_tap_command(c),
+            }
         }
     }
     /// Resolve the fill color for this button's rounded rectangle, or `None`
