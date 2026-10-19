@@ -6,10 +6,7 @@ use std::{
     io::Read,
     os::fd::{AsRawFd, OwnedFd, RawFd},
     process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, MutexGuard,
-    },
+    sync::{Arc, Condvar, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -23,8 +20,48 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_BASE: Duration = Duration::from_secs(15);
 /// Floor on the poll interval so nobody cooks their CPU with `Interval = 0.01`.
 const MIN_INTERVAL: Duration = Duration::from_millis(100);
-/// How often worker threads wake to re-check the stop flag while waiting.
-const POLL_STEP: Duration = Duration::from_millis(50);
+/// While a widget script runs, how often its worker re-checks the timeout and
+/// the stop flag. Output is read as it arrives, so this only bounds how long a
+/// stopped runtime's script can outlive it.
+const CHILD_CHECK: Duration = Duration::from_secs(1);
+/// How often the idle slider setter re-checks the stop flag; new values wake it
+/// at once.
+const SETTER_CHECK: Duration = Duration::from_secs(1);
+
+/// A flag that sleeping threads can wait on: `wait` returns once the flag is
+/// set or the timeout passes, instead of polling. `take` consumes the flag for
+/// one-shot wakeups; the runtime's stop flag stays set.
+#[derive(Default)]
+struct Signal {
+    flag: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Signal {
+    fn set(&self) {
+        *self.flag.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+
+    fn is_set(&self) -> bool {
+        *self.flag.lock().unwrap()
+    }
+
+    /// Wait up to `timeout` for the flag; returns whether it is set.
+    fn wait(&self, timeout: Duration) -> bool {
+        let flag = self.flag.lock().unwrap();
+        let (flag, _) = self.cv.wait_timeout_while(flag, timeout, |f| !*f).unwrap();
+        *flag
+    }
+
+    /// Like `wait`, but clears the flag on the way out.
+    fn take(&self, timeout: Duration) {
+        let flag = self.flag.lock().unwrap();
+        let (mut flag, _) = self.cv.wait_timeout_while(flag, timeout, |f| !*f).unwrap();
+        *flag = false;
+    }
+}
+
 /// How long after a slider set to distrust polled get results: a poll that
 /// STARTED before the set can finish after it carrying the pre-set value,
 /// and applying it would snap the slider's fill backwards.
@@ -103,7 +140,9 @@ struct WidgetJson {
 /// exit on their own.
 pub struct WidgetRuntime {
     results: Arc<Mutex<HashMap<usize, WidgetOutput>>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Signal>,
+    /// Wakes the setter thread when a set or mute is queued.
+    setter_wake: Arc<Signal>,
     /// Latest slider value awaiting its set command, per slider id. The setter
     /// thread drains this; a fast drag coalesces to the newest value instead
     /// of queueing a process run per pixel.
@@ -123,7 +162,8 @@ impl WidgetRuntime {
     pub fn new(widgets: Widgets, wake: Arc<OwnedFd>) -> WidgetRuntime {
         let results: Arc<Mutex<HashMap<usize, WidgetOutput>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(Signal::default());
+        let setter_wake = Arc::new(Signal::default());
         for spec in widgets.commands {
             let results = results.clone();
             let stop = stop.clone();
@@ -163,13 +203,15 @@ impl WidgetRuntime {
                 .map(|s| (s.id, s.get_command.clone()))
                 .collect();
             let setter_results = results.clone();
+            let wake = setter_wake.clone();
             thread::spawn(move || {
-                run_setter(pending, mutes, commands, get_commands, setter_results, stop_flag)
+                run_setter(pending, mutes, commands, get_commands, setter_results, stop_flag, wake)
             });
         }
         WidgetRuntime {
             results,
             stop,
+            setter_wake,
             pending_sets,
             set_commands,
             pending_mutes,
@@ -201,6 +243,7 @@ impl WidgetRuntime {
             },
         );
         self.pending_sets.lock().unwrap().insert(id, value);
+        self.setter_wake.set();
     }
 
     /// Queue a slider's mute command. `arg` is "toggle" (icon tap) or "0"
@@ -212,6 +255,7 @@ impl WidgetRuntime {
                 .lock()
                 .unwrap()
                 .insert(id, fill_placeholder(command, arg));
+            self.setter_wake.set();
         }
     }
 
@@ -236,12 +280,13 @@ fn run_setter(
     commands: HashMap<usize, String>,
     get_commands: HashMap<usize, String>,
     results: Arc<Mutex<HashMap<usize, WidgetOutput>>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Signal>,
+    wake: Arc<Signal>,
 ) {
     // Refresh the cache from the get command once a set/mute has been
     // applied, so the poller's next read agrees -- unless the drag already
     // queued a newer value, in which case that one is about to run anyway.
-    let refresh = |id: usize, stop: &AtomicBool| {
+    let refresh = |id: usize, stop: &Signal| {
         if let Some(get) = get_commands.get(&id) {
             let (out, _) = run_command(get, stop);
             if !pending.lock().unwrap().contains_key(&id)
@@ -258,7 +303,7 @@ fn run_setter(
             (id, cmd)
         })
     };
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         // Mutes drain first: an unmute queued together with a drag's first
         // value must apply before the volume does.
         if let Some((id, command)) = pop_any(&pending_mutes) {
@@ -282,25 +327,28 @@ fn run_setter(
                 }
                 refresh(id, &stop);
             }
-            None => thread::sleep(POLL_STEP),
+            // Queued work sets `wake`; a value queued while a command ran
+            // left it set, so this returns at once.
+            None => wake.take(SETTER_CHECK),
         }
     }
 }
 
 impl Drop for WidgetRuntime {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.set();
+        self.setter_wake.set();
     }
 }
 
 fn run_widget(
     spec: WidgetSpec,
     results: Arc<Mutex<HashMap<usize, WidgetOutput>>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Signal>,
     wake: Arc<OwnedFd>,
 ) {
     let mut retry = RETRY_BASE;
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.is_set() {
         let (output, ok) = run_command(&spec.command, &stop);
         let changed = {
             let mut map = results.lock().unwrap();
@@ -326,24 +374,14 @@ fn run_widget(
             retry = (retry * 2).min(spec.interval.max(RETRY_BASE));
             delay
         };
-        sleep_until(Instant::now() + delay, &stop);
-    }
-}
-
-/// Sleep until `deadline`, waking early (and returning) if `stop` is set.
-fn sleep_until(deadline: Instant, stop: &AtomicBool) {
-    while !stop.load(Ordering::Relaxed) {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        thread::sleep(POLL_STEP.min(deadline - now));
+        // Returns early if the runtime stops.
+        stop.wait(delay);
     }
 }
 
 /// Run `sh -c <command>`, returning its parsed output and whether it exited
 /// zero. Kills the child if it exceeds the timeout or the runtime is stopping.
-fn run_command(command: &str, stop: &AtomicBool) -> (WidgetOutput, bool) {
+fn run_command(command: &str, stop: &Signal) -> (WidgetOutput, bool) {
     let child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -370,46 +408,73 @@ fn run_command(command: &str, stop: &AtomicBool) -> (WidgetOutput, bool) {
     };
     let start = Instant::now();
     let mut ok = false;
+    let mut out = Vec::new();
+    // Block on the script's stdout rather than polling its exit: the output is
+    // read as it arrives, and EOF means the script is done. A script that
+    // blocks (e.g. battery.sh -w waiting on UPower) then costs no wakeups but
+    // the periodic timeout/stop check.
+    let mut stdout = child.stdout.take();
+    let mut reap_wait = Duration::from_millis(1);
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                ok = status.success();
-                break;
-            }
-            Ok(None) => {
-                let timed_out = start.elapsed() > COMMAND_TIMEOUT;
-                if timed_out || stop.load(Ordering::Relaxed) {
-                    if timed_out {
-                        eprintln!(
-                            "not-quite-tiny-dfr: command timed out after {}s: {command:?}",
-                            COMMAND_TIMEOUT.as_secs()
-                        );
-                    }
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return if timed_out {
-                        (
-                            WidgetOutput {
-                                text: "timeout".into(),
-                                color: None,
-                                icon: None,
-                            },
-                            false,
-                        )
-                    } else {
-                        (WidgetOutput::default(), false)
-                    };
+        if stdout.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    ok = status.success();
+                    break;
                 }
-                thread::sleep(POLL_STEP);
+                Ok(None) => {}
+                Err(_) => break,
             }
-            Err(_) => break,
+        }
+        let timed_out = start.elapsed() > COMMAND_TIMEOUT;
+        if timed_out || stop.is_set() {
+            if timed_out {
+                eprintln!(
+                    "not-quite-tiny-dfr: command timed out after {}s: {command:?}",
+                    COMMAND_TIMEOUT.as_secs()
+                );
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return if timed_out {
+                (
+                    WidgetOutput {
+                        text: "timeout".into(),
+                        color: None,
+                        icon: None,
+                    },
+                    false,
+                )
+            } else {
+                (WidgetOutput::default(), false)
+            };
+        }
+        match &mut stdout {
+            Some(pipe) => {
+                let remaining = COMMAND_TIMEOUT.saturating_sub(start.elapsed());
+                let mut pfd = libc::pollfd {
+                    fd: pipe.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ms = CHILD_CHECK.min(remaining).as_millis().max(1) as i32;
+                if unsafe { libc::poll(&mut pfd, 1, ms) } > 0 {
+                    let mut buf = [0u8; 4096];
+                    match pipe.read(&mut buf) {
+                        Ok(0) | Err(_) => stdout = None,
+                        Ok(n) => out.extend_from_slice(&buf[..n]),
+                    }
+                }
+            }
+            // Stdout closed: the script is exiting; reap it with a short,
+            // growing back-off.
+            None => {
+                stop.wait(reap_wait);
+                reap_wait = (reap_wait * 2).min(CHILD_CHECK);
+            }
         }
     }
-    let mut out = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_string(&mut out);
-    }
-    (parse_output(&out), ok)
+    (parse_output(&String::from_utf8_lossy(&out)), ok)
 }
 
 /// Parse a widget's stdout: JSON `{"text","color"}` if it looks like JSON,
@@ -502,5 +567,49 @@ mod tests {
             WidgetSpec::interval_from_secs(Some(5.0)),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn run_command_returns_output_when_script_exits() {
+        let stop = Signal::default();
+        let t = Instant::now();
+        let (o, ok) = run_command("sleep 0.3; echo done", &stop);
+        assert!(ok);
+        assert_eq!(o.text, "done");
+        assert!(t.elapsed() < Duration::from_millis(900), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn run_command_reports_failure() {
+        let stop = Signal::default();
+        let (_, ok) = run_command("exit 3", &stop);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn stop_interrupts_a_running_script() {
+        let stop = Arc::new(Signal::default());
+        let s = stop.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            s.set();
+        });
+        let t = Instant::now();
+        let (_, ok) = run_command("sleep 20", &stop);
+        assert!(!ok);
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn signal_wait_returns_on_set() {
+        let sig = Arc::new(Signal::default());
+        let s = sig.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            s.set();
+        });
+        let t = Instant::now();
+        assert!(sig.wait(Duration::from_secs(10)));
+        assert!(t.elapsed() < Duration::from_secs(1));
     }
 }
